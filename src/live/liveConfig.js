@@ -1,6 +1,6 @@
 /**
  * Risk presets + live custom overrides.
- * Custom: /setsize /settp /setsl /sethold /setscan /setmaxtrades
+ * Persisted to store (Supabase/files) so custom settings survive restarts.
  */
 const PRESETS = {
   easy: {
@@ -34,22 +34,18 @@ const PRESETS = {
     scanIntervalMin: 30,
     maxTradesDay: 20,
     capitalPct: 8,
-    maxPositionSol: 0.20,
+    maxPositionSol: 0.2,
   },
 };
 
-let cached = {
+const DEFAULTS = {
   paused: false,
   riskProfile: 'medium',
-  sizeUsd: PRESETS.medium.sizeUsd,
-  takeProfitPct: PRESETS.medium.takeProfitPct,
-  stopLossPct: PRESETS.medium.stopLossPct,
-  maxHoldMin: PRESETS.medium.maxHoldMin,
-  scanIntervalMin: PRESETS.medium.scanIntervalMin,
-  maxTradesDay: PRESETS.medium.maxTradesDay,
-  capitalPct: PRESETS.medium.capitalPct,
-  maxPositionSol: PRESETS.medium.maxPositionSol,
+  ...PRESETS.medium,
 };
+
+let cached = { ...DEFAULTS };
+let persistFn = null;
 
 function getConfig() {
   return { ...cached };
@@ -57,6 +53,7 @@ function getConfig() {
 
 function applyLocal(patch) {
   cached = { ...cached, ...patch };
+  schedulePersist();
   return getConfig();
 }
 
@@ -65,32 +62,32 @@ function applyPreset(name) {
   const preset = PRESETS[key];
   if (!preset) return null;
   const { name: _n, ...params } = preset;
-  cached = {
-    ...cached,
-    riskProfile: key,
-    ...params,
-  };
+  cached = { ...cached, riskProfile: key, ...params };
+  schedulePersist();
   return getConfig();
 }
 
 function applyCustom(params = {}) {
   const allowed = [
-    'sizeUsd',
-    'takeProfitPct',
-    'stopLossPct',
-    'maxHoldMin',
-    'scanIntervalMin',
-    'maxTradesDay',
-    'maxPositionSol',
-    'capitalPct',
+    'sizeUsd', 'takeProfitPct', 'stopLossPct', 'maxHoldMin',
+    'scanIntervalMin', 'maxTradesDay', 'maxPositionSol', 'capitalPct',
   ];
   const patch = { riskProfile: 'custom' };
   for (const k of allowed) {
     if (params[k] != null && Number.isFinite(Number(params[k]))) {
-      patch[k] = Number(params[k]);
+      let n = Number(params[k]);
+      if (k === 'sizeUsd') n = Math.max(0.5, Math.min(100, n));
+      if (k === 'takeProfitPct') n = Math.max(5, Math.min(500, n));
+      if (k === 'stopLossPct') n = Math.max(5, Math.min(90, n));
+      if (k === 'maxHoldMin') n = Math.max(1, Math.min(240, n));
+      if (k === 'scanIntervalMin') n = Math.max(1, Math.min(180, n));
+      if (k === 'maxTradesDay') n = Math.max(1, Math.min(100, Math.round(n)));
+      if (k === 'maxPositionSol') n = Math.max(0.01, Math.min(5, n));
+      patch[k] = n;
     }
   }
   cached = { ...cached, ...patch };
+  schedulePersist();
   return getConfig();
 }
 
@@ -102,10 +99,36 @@ function listPresets() {
   }));
 }
 
-function start() {
-  console.log('[live-config] presets + custom entry ready');
-  if (cached.riskProfile === 'medium' || !PRESETS[cached.riskProfile]) {
-    applyPreset('medium');
+function schedulePersist() {
+  if (typeof persistFn === 'function') {
+    try {
+      persistFn({ ...cached });
+    } catch (_) {}
+  }
+}
+
+async function start() {
+  try {
+    const store = require('../storage/positionsStore');
+    const saved = await store.get('state', 'liveConfig');
+    if (saved && typeof saved === 'object') {
+      cached = { ...DEFAULTS, ...saved };
+      console.log(
+        `[live-config] restored ${cached.riskProfile} · $${cached.sizeUsd} · TP+${cached.takeProfitPct}% · SL−${cached.stopLossPct}% · hold ${cached.maxHoldMin}m · scan ${cached.scanIntervalMin}m`
+      );
+    } else {
+      cached = { ...DEFAULTS };
+      console.log('[live-config] defaults (medium)');
+    }
+    persistFn = (snapshot) => {
+      store.save('state', 'liveConfig', () => snapshot, (e) =>
+        console.warn('[live-config] persist failed:', e.message)
+      );
+    };
+    schedulePersist();
+  } catch (e) {
+    console.warn('[live-config] load failed, using defaults:', e.message);
+    cached = { ...DEFAULTS };
   }
 }
 
