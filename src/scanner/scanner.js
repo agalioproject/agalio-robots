@@ -1,13 +1,14 @@
 /**
  * Direct token scanner.
- * Targets tokens that:
- *  - have survived at least MIN_AGE_DAYS (default 10)
- *  - show rising price action (positive short/medium changes)
- *  - pass liquidity / volume / activity bars by mode
+ * Picks coins that pass EVERY entry filter in your settings (Settings → Entry filters):
+ * age window, liquidity, volume, buys, buy/sell ratio, "rising" rule, 5m / 24h drop limits.
+ * The same filters are checked again right before buying (src/trading/positions.js), and the
+ * scanner records WHY coins were rejected so you can see what to loosen.
  */
 const logger = require('../utils/logger');
 const market = require('../analysis/dexscreener');
 const { getConfig } = require('../live/liveConfig');
+const { fmtDuration, fmtNum } = require('../live/settings');
 const config = require('../config');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -16,21 +17,18 @@ let running = false;
 let timer = null;
 let lastScanAt = 0;
 let onSignal = null;
+let lastResult = null;
 const seen = new Map();
 const SEEN_TTL_MS = 6 * 60 * 60 * 1000;
-const MIN_AGE_DAYS = 10;
 
 async function fetchSolPriceUsd() {
   try {
-    const res = await fetch(
-      'https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112',
-      { signal: AbortSignal.timeout(5000) }
-    );
+    const res = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!res.ok) return 180;
     const data = await res.json();
-    const pair = (data.pairs || []).find(
-      (p) => p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT'
-    );
+    const pair = (data.pairs || []).find((p) => p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT');
     const px = Number(pair?.priceUsd || 0);
     return px > 10 ? px : 180;
   } catch {
@@ -38,57 +36,43 @@ async function fetchSolPriceUsd() {
   }
 }
 
+async function fetchJson(url, ms = 8000) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(ms) });
+  return res.ok ? res.json() : null;
+}
+
 async function fetchCandidates() {
   const mints = new Set();
-
-  try {
-    const res = await fetch('https://api.dexscreener.com/token-boosts/latest/v1', {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const arr = await res.json();
-      for (const item of arr || []) {
-        if (item.chainId === 'solana' && item.tokenAddress) mints.add(item.tokenAddress);
-      }
+  const add = (chainId, addr) => {
+    if (chainId === 'solana' && addr) mints.add(addr);
+  };
+  for (const url of ['https://api.dexscreener.com/token-boosts/latest/v1', 'https://api.dexscreener.com/token-profiles/latest/v1']) {
+    try {
+      for (const item of (await fetchJson(url)) || []) add(item.chainId, item.tokenAddress);
+    } catch (e) {
+      logger.warn(`${url.split('/').slice(-2, -1)[0]} fetch failed:`, e.message);
     }
-  } catch (e) {
-    logger.warn('boosts fetch failed:', e.message);
   }
-
   try {
-    const res = await fetch('https://api.dexscreener.com/token-profiles/latest/v1', {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const arr = await res.json();
-      for (const item of arr || []) {
-        if (item.chainId === 'solana' && item.tokenAddress) mints.add(item.tokenAddress);
-      }
-    }
-  } catch (e) {
-    logger.warn('profiles fetch failed:', e.message);
+    const data = await fetchJson('https://api.dexscreener.com/latest/dex/search?q=solana');
+    for (const p of (data && data.pairs) || []) add(p.chainId, p.baseToken?.address);
+  } catch (_) {
+    /* optional source */
   }
-
-  try {
-    const res = await fetch('https://api.dexscreener.com/latest/dex/search?q=solana', {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      for (const p of data.pairs || []) {
-        if (p.chainId === 'solana' && p.baseToken?.address) mints.add(p.baseToken.address);
-      }
-    }
-  } catch (_) {}
-
   return [...mints].slice(0, 50);
 }
 
-function scoreChart(mkt, mode) {
-  if (!mkt || !(mkt.priceNative > 0)) return -Infinity;
+/**
+ * Checks one market snapshot against ALL your entry filters.
+ * Returns { ok:true, score } or { ok:false, reason } — reason is a short bucket name for the rejection stats.
+ * Pure (no network), so it is unit-tested.
+ */
+function evaluate(mkt, cfg) {
+  if (!mkt || !(mkt.priceNative > 0)) return { ok: false, reason: 'no SOL price' };
 
-  const ageDays = mkt.ageDays || 0;
-  if (ageDays < MIN_AGE_DAYS) return -Infinity;
+  if (mkt.ageSec == null) return { ok: false, reason: 'age unknown' };
+  if (mkt.ageSec < cfg.minAgeSec) return { ok: false, reason: `younger than ${fmtDuration(cfg.minAgeSec)}` };
+  if (mkt.ageSec > cfg.maxAgeSec) return { ok: false, reason: `older than ${fmtDuration(cfg.maxAgeSec)}` };
 
   const liq = mkt.liquidityUsd || 0;
   const vol1h = mkt.volume1h || 0;
@@ -100,23 +84,17 @@ function scoreChart(mkt, mode) {
   const buys1h = mkt.buys1h || 0;
   const sells1h = mkt.sells1h || 0;
 
-  const rising = ch1h > 0 || ch6h > 2;
-  if (!rising) return -Infinity;
-  if (ch5 < -12) return -Infinity;
-  if (ch24h < -40) return -Infinity;
-
-  const bars = {
-    easy: { minLiq: 8000, minVol1h: 1500, minBuys1h: 5 },
-    medium: { minLiq: 15000, minVol1h: 4000, minBuys1h: 12 },
-    hard: { minLiq: 30000, minVol1h: 8000, minBuys1h: 20 },
-  };
-  const b = bars[mode] || bars.medium;
-  if (liq < b.minLiq) return -Infinity;
-  if (vol1h < b.minVol1h && vol6h < b.minVol1h * 3) return -Infinity;
-  if (buys1h < b.minBuys1h) return -Infinity;
+  if (liq < cfg.minLiquidityUsd) return { ok: false, reason: `liquidity < $${fmtNum(cfg.minLiquidityUsd)}` };
+  if (vol1h < cfg.minVolume1hUsd && vol6h < cfg.minVolume1hUsd * 3) return { ok: false, reason: `volume < $${fmtNum(cfg.minVolume1hUsd)}/h` };
+  if (buys1h < cfg.minBuys1h) return { ok: false, reason: `buys < ${cfg.minBuys1h}/h` };
 
   const buyPressure = sells1h > 0 ? buys1h / sells1h : buys1h > 0 ? 2 : 0;
-  if (buyPressure < 0.7) return -Infinity;
+  if (buyPressure < cfg.minBuyPressure) return { ok: false, reason: `buy/sell ratio < ${fmtNum(cfg.minBuyPressure)}` };
+
+  const rising = ch1h > cfg.minChange1hPct || ch6h > cfg.minChange6hPct;
+  if (!rising) return { ok: false, reason: 'not rising' };
+  if (ch5 < -cfg.maxDrop5mPct) return { ok: false, reason: `fell > ${fmtNum(cfg.maxDrop5mPct)}% in 5m` };
+  if (ch24h < -cfg.maxDrop24hPct) return { ok: false, reason: `fell > ${fmtNum(cfg.maxDrop24hPct)}% in 24h` };
 
   let score = 0;
   score += Math.min(ch5, 25) * 1.5;
@@ -125,22 +103,21 @@ function scoreChart(mkt, mode) {
   score += Math.log10(Math.max(liq, 1)) * 10;
   score += Math.log10(Math.max(vol1h, 1)) * 6;
   score += Math.min(buyPressure, 3) * 8;
-  score += Math.min(ageDays, 60) * 0.3;
-  return score;
+  score += Math.min(mkt.ageSec / 86400, 60) * 0.3;
+  return { ok: true, score };
 }
 
 function pruneSeen() {
   const now = Date.now();
-  for (const [m, ts] of seen) {
-    if (now - ts > SEEN_TTL_MS) seen.delete(m);
-  }
+  for (const [m, ts] of seen) if (now - ts > SEEN_TTL_MS) seen.delete(m);
 }
 
 async function pickOne() {
   const cfg = getConfig();
-  const mode = cfg.riskProfile || 'medium';
   pruneSeen();
   const candidates = await fetchCandidates();
+  const result = { at: Date.now(), candidates: candidates.length, checked: 0, rejects: {}, picked: null };
+  lastResult = result;
   if (!candidates.length) {
     logger.info('scanner: no candidates this cycle');
     return null;
@@ -148,47 +125,48 @@ async function pickOne() {
 
   const scored = [];
   for (const mint of candidates) {
-    if (seen.has(mint)) continue;
-    if (config.IGNORE_MINTS.includes(mint)) continue;
+    if (seen.has(mint) || config.IGNORE_MINTS.includes(mint)) continue;
     try {
       const mkt = await market.getTokenMarket(mint);
-      if (!mkt) continue;
-      const s = scoreChart(mkt, mode);
-      if (s > -Infinity) scored.push({ mint, mkt, score: s });
-    } catch (_) {}
+      result.checked += 1;
+      const ev = evaluate(mkt, cfg);
+      if (ev.ok) scored.push({ mint, mkt, score: ev.score });
+      else result.rejects[ev.reason] = (result.rejects[ev.reason] || 0) + 1;
+    } catch (_) {
+      result.rejects['lookup failed'] = (result.rejects['lookup failed'] || 0) + 1;
+    }
     await sleep(120);
   }
 
   scored.sort((a, b) => b.score - a.score);
   if (!scored.length) {
-    logger.info(`scanner: ${candidates.length} candidates, none passed ${mode} bar (age≥${MIN_AGE_DAYS}d + rising)`);
+    const top = Object.entries(result.rejects).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} (${v})`).join(', ');
+    logger.info(`scanner: ${candidates.length} candidates, none passed your filters — most common: ${top || 'n/a'}`);
     return null;
   }
 
-  const top = scored.slice(0, 5);
-  const pick = top[Math.floor(Math.random() * top.length)];
+  const pool = scored.slice(0, 5);
+  const pick = pool[Math.floor(Math.random() * pool.length)];
   seen.set(pick.mint, Date.now());
+  result.picked = pick.mint;
   logger.info(
-    `scanner pick ${pick.mint.slice(0, 8)}… score=${pick.score.toFixed(1)} age=${pick.mkt.ageDays.toFixed(1)}d liq=$${Math.round(pick.mkt.liquidityUsd)} ch1h=${(pick.mkt.priceChange1h || 0).toFixed(1)}% buys1h=${pick.mkt.buys1h || 0}`
+    `scanner pick ${pick.mint.slice(0, 8)}… score=${pick.score.toFixed(1)} age=${fmtDuration(pick.mkt.ageSec)} liq=$${Math.round(pick.mkt.liquidityUsd)} ch1h=${(pick.mkt.priceChange1h || 0).toFixed(1)}% buys1h=${pick.mkt.buys1h || 0}`
   );
   return pick;
 }
 
-async function tick() {
+async function tick(force = false) {
   if (running) return;
   const cfg = getConfig();
   if (cfg.paused) return;
-
   const intervalMs = (Number(cfg.scanIntervalMin) || 10) * 60 * 1000;
-  if (Date.now() - lastScanAt < intervalMs - 2000) return;
+  if (!force && Date.now() - lastScanAt < intervalMs - 2000) return;
 
   running = true;
   lastScanAt = Date.now();
   try {
     const pick = await pickOne();
-    if (pick && typeof onSignal === 'function') {
-      await onSignal(pick);
-    }
+    if (pick && typeof onSignal === 'function') await onSignal(pick);
   } catch (e) {
     logger.error('scanner tick:', e.message);
   } finally {
@@ -196,12 +174,20 @@ async function tick() {
   }
 }
 
+/** Scan immediately instead of waiting for the interval (used by "Apply & run"). */
+function rescanNow() {
+  lastScanAt = 0;
+  setTimeout(() => tick(true).catch(() => {}), 500).unref();
+}
+
 function start(handler) {
   onSignal = handler;
   if (timer) clearInterval(timer);
-  setTimeout(() => tick().catch(() => {}), 15000);
+  setTimeout(() => tick().catch(() => {}), 15000).unref();
   timer = setInterval(() => tick().catch(() => {}), 30000);
-  logger.info(`scanner started (min age ${MIN_AGE_DAYS}d, rising + activity filters)`);
+  timer.unref();
+  const c = getConfig();
+  logger.info(`scanner started (age ${fmtDuration(c.minAgeSec)}–${fmtDuration(c.maxAgeSec)}, liq ≥ $${fmtNum(c.minLiquidityUsd)}, every ${c.scanIntervalMin}m)`);
 }
 
 function stop() {
@@ -210,17 +196,14 @@ function stop() {
 }
 
 function status() {
+  const interval = (Number(getConfig().scanIntervalMin) || 10) * 60 * 1000;
   return {
     lastScanAt,
     seenCount: seen.size,
-    minAgeDays: MIN_AGE_DAYS,
-    nextInSec: Math.max(
-      0,
-      Math.round(
-        (((getConfig().scanIntervalMin || 10) * 60 * 1000) - (Date.now() - lastScanAt)) / 1000
-      )
-    ),
+    scanning: running,
+    lastResult,
+    nextInSec: lastScanAt ? Math.max(0, Math.round((interval - (Date.now() - lastScanAt)) / 1000)) : 0,
   };
 }
 
-module.exports = { start, stop, status, fetchSolPriceUsd, pickOne, MIN_AGE_DAYS };
+module.exports = { start, stop, status, fetchSolPriceUsd, pickOne, rescanNow, evaluate };

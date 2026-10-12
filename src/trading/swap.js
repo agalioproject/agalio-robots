@@ -8,6 +8,7 @@
  */
 const { VersionedTransaction } = require('@solana/web3.js');
 const config = require('../config');
+const { getConfig } = require('../live/liveConfig');
 const { rpc, broadcast, signatureOf } = require('../solana/rpc');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -108,16 +109,17 @@ async function buy(wallet, mint, sol) {
     mint,
     amount: solAmount(sol),
     denominatedInSol: 'true',
-    slippage: config.BUY_SLIPPAGE_PCT,
-    priorityFee: config.BUY_PRIORITY_FEE_SOL,
+    slippage: getConfig().buySlippagePct,
+    priorityFee: getConfig().buyPriorityFeeSol,
   });
   return landTx(tx, wallet, config.BUY_CONFIRM_TIMEOUT_MS);
 }
 
 function sellParams(attempt = 1) {
+  const c = getConfig(); // your live Telegram settings
   return {
-    slippage: Math.min(config.SELL_SLIPPAGE_PCT + config.SELL_SLIPPAGE_STEP_PCT * (attempt - 1), config.SELL_SLIPPAGE_MAX_PCT),
-    priorityFee: Number((config.SELL_PRIORITY_FEE_SOL * attempt).toFixed(6)),
+    slippage: Math.min(c.sellSlippagePct + config.SELL_SLIPPAGE_STEP_PCT * (attempt - 1), c.sellSlippageMaxPct),
+    priorityFee: Number((c.sellPriorityFeeSol * attempt).toFixed(6)),
   };
 }
 
@@ -141,8 +143,8 @@ async function routeCheck(wallet, mint, sol) {
     mint,
     amount: solAmount(sol),
     denominatedInSol: 'true',
-    slippage: config.BUY_SLIPPAGE_PCT,
-    priorityFee: config.BUY_PRIORITY_FEE_SOL,
+    slippage: getConfig().buySlippagePct,
+    priorityFee: getConfig().buyPriorityFeeSol,
   });
   return true;
 }

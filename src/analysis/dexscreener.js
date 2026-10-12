@@ -2,7 +2,7 @@ const { SOL_MINT } = require('../config');
 
 /**
  * Market snapshot from DexScreener (free, no key).
- * Includes pair age (pairCreatedAt) for 10-day survival filter.
+ * Includes the pair age (ageSec, null if DexScreener does not know it) for the age-window filter.
  * priceNative only used when pair is quoted in SOL.
  */
 async function getTokenMarket(mint) {
@@ -23,8 +23,11 @@ async function getTokenMarket(mint) {
   const priceNative = Number(best.priceNative || 0) || 0;
   if (!(priceNative > 0)) return null;
 
-  const createdAt = Number(best.pairCreatedAt || 0) || 0;
-  const ageDays = createdAt > 0 ? (Date.now() - createdAt) / (1000 * 60 * 60 * 24) : 0;
+  // Earliest pair of this token = when it was really launched (a later pool may be a migration).
+  const created = pairs.map((x) => Number(x.pairCreatedAt || 0)).filter((n) => n > 0);
+  const createdAt = created.length ? Math.min(...created) : 0;
+  const ageSec = createdAt > 0 ? Math.max(0, (Date.now() - createdAt) / 1000) : null; // null = unknown
+  const ageDays = ageSec == null ? 0 : ageSec / 86400;
 
   const txnsH1 = (best.txns && best.txns.h1) || {};
   const buys1h = Number(txnsH1.buys || 0) || 0;
@@ -43,6 +46,7 @@ async function getTokenMarket(mint) {
     priceChange6h: Number(best.priceChange?.h6 || 0) || 0,
     priceChange24h: Number(best.priceChange?.h24 || 0) || 0,
     pairCreatedAt: createdAt,
+    ageSec,
     ageDays,
     buys1h,
     sells1h,

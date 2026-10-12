@@ -7,19 +7,22 @@ const telegram = require('./src/telegram/bot');
 const wallet = require('./src/solana/wallet');
 const rpcPool = require('./src/solana/rpc');
 const scanner = require('./src/scanner/scanner');
+const memory = require('./src/learning/memory');
+const { fmtDuration } = require('./src/live/settings');
 
-console.log('=== De-Government Strategy v3 — Direct Scanner ===');
+console.log(`=== De-Government Strategy v${config.VERSION} — Direct Scanner ===`);
 console.log(config.DRY_RUN ? 'Mode: DRY RUN (paper trading, nothing is sent)' : 'Mode: LIVE (real money)');
 const cfg = liveConfig.getConfig();
 console.log(
-  `Active: ${cfg.riskProfile} · $${cfg.sizeUsd} · TP +${cfg.takeProfitPct}% · SL −${cfg.stopLossPct}% · hold ${cfg.maxHoldMin}m · every ${cfg.scanIntervalMin}m · max ${cfg.maxTradesDay}/day`
+  `Starting values: ${cfg.riskProfile} · $${cfg.sizeUsd} · TP +${cfg.takeProfitPct}% · SL −${cfg.stopLossPct}% · hold ${cfg.maxHoldMin}m · every ${cfg.scanIntervalMin}m · max ${cfg.maxTradesDay}/day (your saved Telegram settings load next)`
 );
 console.log(`RPC pool: ${rpcPool.status().map((e) => e.host).join(', ')}`);
 
 async function main() {
   wallet.loadWallet();
 
-  liveConfig.start();
+  await liveConfig.start(); // load your saved settings BEFORE anything starts using them
+  await memory.init();
   positions.setNotifier((text) => telegram.notify(text));
   await positions.init();
   telegram.start();
@@ -39,7 +42,8 @@ async function main() {
     announceEntry(res, pick.mint, why);
   });
 
-  logger.info('scanner active — looking for good-chart coins on the mode interval');
+  const now = liveConfig.getConfig();
+  logger.info(`scanner active — age ${fmtDuration(now.minAgeSec)}–${fmtDuration(now.maxAgeSec)}, every ${now.scanIntervalMin}m`);
 }
 
 function announceEntry(res, mint, why) {
@@ -49,7 +53,7 @@ function announceEntry(res, mint, why) {
     telegram.notify(
       `🟢 ENTERED ${mint.slice(0, 6)}…${mint.slice(-4)} · ${config.DRY_RUN ? 'PAPER' : 'LIVE'}\n` +
         `${why} · mode ${cfg.riskProfile}\n` +
-        `in: ${p.sizeSol.toFixed(4)} SOL (≈$${cfg.sizeUsd}) → ${(Number(p.tokenRaw) / 10 ** p.decimals).toFixed(2)} tokens (${p.fillSource})\n` +
+        `in: ${p.sizeSol.toFixed(4)} SOL (≈$${(p.actualUsd ?? cfg.sizeUsd).toFixed(2)}${p.sizeLimitedBy ? ` — limited by ${p.sizeLimitedBy}` : ''}) → ${(Number(p.tokenRaw) / 10 ** p.decimals).toFixed(2)} tokens (${p.fillSource})\n` +
         `TP +${cfg.takeProfitPct}% · SL −${cfg.stopLossPct}% · max hold ${cfg.maxHoldMin}m` +
         (p.buySig ? `\nhttps://solscan.io/tx/${p.buySig}` : '')
     );

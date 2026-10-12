@@ -33,7 +33,7 @@ const rpcFromEnv = list('RPC_URLS').concat(list('RPC_URL'));
 const DRY_RUN = process.env.DRY_RUN !== 'false';
 
 module.exports = {
-  VERSION: '3.0.0',
+  VERSION: '3.4.0',
   DRY_RUN,
 
   RPC_URLS: rpcFromEnv.length ? rpcFromEnv : DEFAULT_RPC_URLS,
@@ -45,18 +45,11 @@ module.exports = {
 
   SOL_MINT: 'So11111111111111111111111111111111111111112',
 
-  // ---- strategy (live-adjustable ones are mirrored in src/live/liveConfig.js) ----
-  DIP_ENTRY_PCT: num('DIP_ENTRY_PCT', 18),
-  TAKE_PROFIT_PCT: num('TAKE_PROFIT_PCT', 50),
-  STOP_LOSS_PCT: num('STOP_LOSS_PCT', 25),
-  MAX_HOLD_MIN: num('MAX_HOLD_MIN', 120),
-  CAPITAL_PCT: num('CAPITAL_PCT', 5),
-  MAX_POSITION_SOL: num('MAX_POSITION_SOL', 0.15),
+  // ---- STARTING values for settings you can change live in Telegram (Settings menu) ----
+  // These env values are only the first value; once you change something in Telegram, that wins.
   MIN_POSITION_SOL: num('MIN_POSITION_SOL', 0.02),
   SOL_FEE_RESERVE: num('SOL_FEE_RESERVE', 0.03),
   MAX_CONCURRENT: num('MAX_CONCURRENT', 1),
-  MIN_WHALE_AGREEMENT: num('MIN_WHALE_AGREEMENT', 2),
-  WHALE_LOOKBACK_MIN: num('WHALE_LOOKBACK_MIN', 30),
   MAX_DAILY_LOSS_PCT: num('MAX_DAILY_LOSS_PCT', 25),
 
   // ---- execution ----
@@ -72,23 +65,14 @@ module.exports = {
   SELL_CONFIRM_TIMEOUT_MS: num('SELL_CONFIRM_TIMEOUT_MS', 15000),
   REBROADCAST_MS: num('REBROADCAST_MS', 1000),
 
-  // ---- entry safety ----
-  MIN_LIQUIDITY_USD: num('MIN_LIQUIDITY_USD', 3000),
+  // ---- entry safety (starting value; live switch in Settings → Entry filters) ----
   REQUIRE_NO_AUTHORITIES: bool('REQUIRE_NO_AUTHORITIES', true),
 
   EXIT_COST_PCT: num('EXIT_COST_PCT', 2),
 
-  // ---- whale detection ----
-  WHALE_WALLETS: list('WHALE_WALLETS'),
-  WHALE_POLL_MS: num('WHALE_POLL_MS', 5000),
-  WHALE_BATCH: num('WHALE_BATCH', 4),
-  WHALE_MAX_TX_PER_POLL: num('WHALE_MAX_TX_PER_POLL', 12),
-  MIN_WHALE_BUY_SOL: num('MIN_WHALE_BUY_SOL', 0.05),
-  MIN_WHALE_BUY_USD: num('MIN_WHALE_BUY_USD', 10),
   IGNORE_MINTS: list('IGNORE_MINTS'),
 
   PRICE_POLL_MS: num('PRICE_POLL_MS', 8000),
-  MIGRATE_POLL_MS: num('MIGRATE_POLL_MS', 30000),
 
   // ---- paper trading (DRY_RUN=true) ----
   DRY_RUN_BALANCE_SOL: num('DRY_RUN_BALANCE_SOL', 1),

@@ -1,6 +1,9 @@
 /**
  * Self-learning trade memory.
- * Logs closed trades to Supabase trade_log; builds review + actionable advice.
+ *  - Journal: every closed trade is kept in the bot's own store (Supabase bot_state or local files),
+ *    so learning works WITHOUT any extra table. (Last JOURNAL_MAX trades.)
+ *  - Also mirrored to Supabase trade_log when it exists, for your own analysis.
+ *  - Builds the review text; src/learning/tuner.js turns the journal into setting suggestions.
  */
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -15,7 +18,61 @@ function headers(extra = {}) {
   return h;
 }
 
+const JOURNAL_MAX = 500;
+let journal = [];
+
+async function init() {
+  try {
+    const j = await store.get('state', 'journal');
+    if (Array.isArray(j)) journal = j;
+  } catch (e) {
+    logger.warn('journal load failed:', e.message);
+  }
+  return journal.length;
+}
+
+const getJournal = () => journal.slice();
+
+function journalAdd(row) {
+  journal.push({
+    t: Date.now(),
+    profile: row.profile || null,
+    mint: row.mint,
+    exit: row.exitReason || null,
+    realizedSol: row.realizedSol ?? null,
+    pct: row.pct ?? null,
+    holdSec: row.holdSec ?? null,
+    ageSec: row.ageSec ?? (row.ageDays != null ? row.ageDays * 86400 : null),
+    liq: row.liquidityUsd ?? null,
+    vol1h: row.volume1h ?? null,
+    buys1h: row.buys1h ?? null,
+    buyPressure: row.meta && row.meta.buyPressure != null ? row.meta.buyPressure : null,
+    ch1h: row.priceChange1h ?? null,
+    ch6h: row.priceChange6h ?? null,
+    score: row.score ?? null,
+    sizeUsd: row.sizeUsd ?? null,
+    tp: row.takeProfitPct ?? null,
+    sl: row.stopLossPct ?? null,
+    maxHold: row.maxHoldMin ?? null,
+    peakPnl: row.meta && row.meta.peakPnlPct != null ? row.meta.peakPnlPct : null,
+    peakAtSec: row.meta && row.meta.peakAtSec != null ? row.meta.peakAtSec : null,
+  });
+  if (journal.length > JOURNAL_MAX) journal = journal.slice(-JOURNAL_MAX);
+  store.save('state', 'journal', () => journal.slice(), (e) => logger.warn('journal save failed:', e.message));
+}
+
+function resetJournal() {
+  journal = [];
+  store.save('state', 'journal', () => [], () => {});
+}
+
 async function logTrade(row) {
+  journalAdd(row);
+  try {
+    require('./tuner').afterTrade(); // auto-learning (only acts if Learning is set to Auto)
+  } catch (e) {
+    logger.warn('tuner hook failed:', e.message);
+  }
   if (!usingSupabase()) return false;
   try {
     const body = {
@@ -104,7 +161,7 @@ function buildAdvice(rows) {
     pct: Number(r.pct),
     profile: r.profile || 'unknown',
     exit: r.exit_reason || r.exitReason || '?',
-    age: Number(r.age_days ?? r.ageDays),
+    age: r.age_sec != null ? Number(r.age_sec) : Number(r.age_days ?? r.ageDays) * 86400,
     liq: Number(r.liquidity_usd ?? r.liquidityUsd),
     ch1h: Number(r.price_change_1h ?? r.priceChange1h),
     score: Number(r.score),
@@ -149,10 +206,13 @@ function buildAdvice(rows) {
       };
     });
 
+  const D = 86400;
   const ageStats = bucketize(known, 'age', [
-    { name: '10–20d', min: 10, max: 20 },
-    { name: '20–40d', min: 20, max: 40 },
-    { name: '40d+', min: 40, max: 9999 },
+    { name: 'age <1h', min: 0, max: 3600 },
+    { name: 'age 1h–1d', min: 3600, max: D },
+    { name: 'age 1–10d', min: D, max: 10 * D },
+    { name: 'age 10–20d', min: 10 * D, max: 20 * D },
+    { name: 'age 20d+', min: 20 * D, max: 1e12 },
   ]);
   const momStats = bucketize(known, 'ch1h', [
     { name: 'ch1h 0–5%', min: 0, max: 5 },
@@ -239,28 +299,15 @@ function formatReview(advice, label = 'DAILY REVIEW') {
 }
 
 async function review({ days = 7 } = {}) {
-  const rows = await fetchTrades({ limit: 150, days });
-  let local = [];
-  try {
-    const h = await store.get('state', 'history');
-    if (Array.isArray(h)) local = h;
-  } catch (_) {}
-  const merged = rows.length
-    ? rows
-    : local.map((h) => ({
-        realized_sol: h.realizedSol,
-        pct: h.pct,
-        profile: h.mode,
-        exit_reason: h.reason,
-        mint: h.mint,
-        hold_sec: h.closedAt && h.openedAt ? Math.round((h.closedAt - h.openedAt) / 1000) : null,
-        age_days: h.ageDays,
-        liquidity_usd: h.liquidityUsd,
-        volume_1h: h.volume1h,
-        price_change_1h: h.priceChange1h,
-        score: h.score,
-        size_usd: h.sizeUsd,
-      }));
+  // The journal always exists; trade_log is only a mirror, so it is just the fallback for older trades.
+  const since = Date.now() - days * 86400000;
+  const fromJournal = journal
+    .filter((j) => j.t >= since)
+    .map((j) => ({
+      realized_sol: j.realizedSol, pct: j.pct, profile: j.profile, exit_reason: j.exit, mint: j.mint, hold_sec: j.holdSec,
+      age_sec: j.ageSec, liquidity_usd: j.liq, volume_1h: j.vol1h, price_change_1h: j.ch1h, score: j.score, size_usd: j.sizeUsd,
+    }));
+  const merged = fromJournal.length ? fromJournal : await fetchTrades({ limit: 150, days });
   const advice = buildAdvice(merged);
   return {
     advice,
@@ -274,4 +321,4 @@ async function advice() {
   return { advice: a, text: text.replace('30-DAY REVIEW', 'ADVICE FROM YOUR TRADES'), n };
 }
 
-module.exports = { logTrade, fetchTrades, buildAdvice, formatReview, review, advice };
+module.exports = { init, getJournal, resetJournal, logTrade, fetchTrades, buildAdvice, formatReview, review, advice };

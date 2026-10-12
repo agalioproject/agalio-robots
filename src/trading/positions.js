@@ -53,21 +53,34 @@ async function rollDay() {
 async function isHalted() {
   await rollDay();
   if (!(daily.startSol > 0)) return false;
-  const limit = (daily.startSol * config.MAX_DAILY_LOSS_PCT) / 100;
+  const limit = (daily.startSol * Number(getConfig().maxDailyLossPct)) / 100;
   return daily.realizedSol <= -limit;
 }
 
+/**
+ * How much SOL to spend. Starts from your dollar size, then is limited by YOUR "Max SOL per trade"
+ * (0 = no cap) and by what the wallet can afford. Says what limited it so the bot never silently
+ * trades less than you asked for.
+ */
 async function sizeSol() {
   const cfg = getConfig();
   const bal = await currentBalanceSol();
   const usable = Math.max(0, bal - config.SOL_FEE_RESERVE);
   const solUsd = await scanner.fetchSolPriceUsd();
-  let sol = (Number(cfg.sizeUsd) || 2) / solUsd;
-  const hardCap = Number(cfg.maxPositionSol) || 0.2;
-  if (hardCap > 0) sol = Math.min(sol, hardCap);
-  sol = Math.min(sol, usable * 0.95);
+  const wanted = Number(cfg.sizeUsd) / solUsd;
+  let sol = wanted;
+  let limitedBy = null;
+  const cap = Number(cfg.maxPositionSol);
+  if (cap > 0 && sol > cap) {
+    sol = cap;
+    limitedBy = `your Max SOL per trade (${cap} SOL)`;
+  }
+  if (sol > usable * 0.95) {
+    sol = usable * 0.95;
+    limitedBy = `wallet balance (${usable.toFixed(4)} SOL usable after the ${config.SOL_FEE_RESERVE} SOL fee reserve)`;
+  }
   if (sol < config.MIN_POSITION_SOL) sol = 0;
-  return Math.floor(sol * 1e6) / 1e6;
+  return { sol: Math.floor(sol * 1e6) / 1e6, wantedSol: wanted, solUsd, limitedBy };
 }
 
 async function liveBuy(mint, sol) {
@@ -131,7 +144,7 @@ async function tryEnter(mint, reason) {
   const cfg = getConfig();
   if (cfg.paused) return { ok: false, why: 'paused' };
   if (open.has(mint) || entering) return { ok: false, why: 'busy' };
-  if (open.size >= config.MAX_CONCURRENT) return { ok: false, why: 'max concurrent' };
+  if (open.size >= Number(cfg.maxOpen)) return { ok: false, why: 'max concurrent' };
   await rollDay();
   const maxTrades = Number(cfg.maxTradesDay) || 7;
   if (daily.tradesToday >= maxTrades) {
@@ -142,16 +155,17 @@ async function tryEnter(mint, reason) {
     if (await isHalted()) return { ok: false, why: 'daily loss limit reached' };
     const mkt = await market.getTokenMarket(mint);
     if (!mkt) return { ok: false, why: 'no SOL-quoted market found' };
-    if (mkt.liquidityUsd < config.MIN_LIQUIDITY_USD) {
-      return { ok: false, why: `liquidity $${Math.round(mkt.liquidityUsd)} < $${config.MIN_LIQUIDITY_USD}` };
-    }
-    if (config.REQUIRE_NO_AUTHORITIES) {
+    // Re-check EVERY entry filter right before buying: the market moves between the scan and the buy.
+    const ev = scanner.evaluate(mkt, cfg);
+    if (!ev.ok) return { ok: false, why: `no longer passes your filters: ${ev.reason}` };
+    if (cfg.requireNoAuthorities) {
       const mi = await chain.getMintInfo(mint);
       if (mi.mintAuthority || mi.freezeAuthority) return { ok: false, why: 'mint/freeze authority still active' };
     }
-    const sol = await sizeSol();
-    if (sol < config.MIN_POSITION_SOL) return { ok: false, why: `size ${sol} SOL below minimum` };
-    logger.info(`ENTER ${short(mint)} ${sol} SOL ($${cfg.sizeUsd}) (${reason}) ${config.DRY_RUN ? '[PAPER]' : '[LIVE]'}`);
+    const size = await sizeSol();
+    const sol = size.sol;
+    if (sol < config.MIN_POSITION_SOL) return { ok: false, why: `size ${sol} SOL below the ${config.MIN_POSITION_SOL} SOL minimum${size.limitedBy ? ` (limited by ${size.limitedBy})` : ''}` };
+    logger.info(`ENTER ${short(mint)} ${sol} SOL (wanted $${cfg.sizeUsd}${size.limitedBy ? `, limited by ${size.limitedBy}` : ''}) (${reason}) ${config.DRY_RUN ? '[PAPER]' : '[LIVE]'}`);
     const fill = config.DRY_RUN ? await paperBuy(mint, sol, mkt) : await liveBuy(mint, sol);
     const costSol = toSol(fill.costLamports);
     const tokensUi = Number(fill.tokenRaw) / 10 ** fill.decimals;
@@ -166,6 +180,8 @@ async function tryEnter(mint, reason) {
       decimals: fill.decimals,
       sizeSol: costSol,
       sizeUsd: cfg.sizeUsd,
+      sizeLimitedBy: size.limitedBy,
+      actualUsd: costSol * size.solUsd,
       entryPriceNative: costSol / tokensUi,
       fillSource: fill.source,
       buySig: fill.signature,
@@ -177,11 +193,14 @@ async function tryEnter(mint, reason) {
       priceChange1h: mkt.priceChange1h ?? null,
       priceChange6h: mkt.priceChange6h ?? null,
       buys1h: mkt.buys1h ?? null,
+      buyPressure: mkt.sells1h > 0 ? mkt.buys1h / mkt.sells1h : null,
       score: scoreMatch ? Number(scoreMatch[1]) : null,
       takeProfitPct: cfg.takeProfitPct,
       stopLossPct: cfg.stopLossPct,
       maxHoldMin: cfg.maxHoldMin,
       lastPnl: null,
+      peakPnl: 0,
+      peakAtSec: 0,
       lastPrice: null,
       priceMisses: 0,
       stuckRounds: 0,
@@ -219,6 +238,10 @@ async function checkPosition(pos) {
       pnl = markPnl(pos, mkt.priceNative);
       pos.lastPrice = mkt.priceNative;
       pos.lastPnl = pnl;
+      if (pnl > (pos.peakPnl || 0)) {
+        pos.peakPnl = pnl; // best profit seen — Learning uses it to tune take-profit / max hold
+        pos.peakAtSec = Math.round((Date.now() - pos.openedAt) / 1000);
+      }
       pos.priceMisses = 0;
     } else {
       pos.priceMisses += 1;
@@ -383,6 +406,7 @@ async function finalizeClose(pos, reason, result) {
       maxHoldMin: pos.maxHoldMin,
       buySig: pos.buySig,
       sellSig: result.sig,
+      meta: { peakPnlPct: pos.peakPnl ?? null, peakAtSec: pos.peakAtSec ?? null, buyPressure: pos.buyPressure ?? null, sellSource: result.source },
     })
     .catch(() => {});
   const head = realizedSol == null ? '⚪' : realizedSol >= 0 ? '🟢' : '🔴';
@@ -508,4 +532,5 @@ module.exports = {
   monitorTick,
   markPnl,
   isHalted,
+  sizeSol, // exported for tests
 };
