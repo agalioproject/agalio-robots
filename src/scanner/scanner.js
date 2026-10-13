@@ -190,6 +190,13 @@ function start(handler) {
   logger.info(`scanner started (age ${fmtDuration(c.minAgeSec)}–${fmtDuration(c.maxAgeSec)}, liq ≥ $${fmtNum(c.minLiquidityUsd)}, every ${c.scanIntervalMin}m)`);
 }
 
+/** Forget which coins were already picked and the last scan result (Fresh start). */
+function clearSeen() {
+  seen.clear();
+  lastResult = null;
+  lastScanAt = 0;
+}
+
 function stop() {
   if (timer) clearInterval(timer);
   timer = null;
@@ -206,4 +213,4 @@ function status() {
   };
 }
 
-module.exports = { start, stop, status, fetchSolPriceUsd, pickOne, rescanNow, evaluate };
+module.exports = { start, stop, clearSeen, status, fetchSolPriceUsd, pickOne, rescanNow, evaluate };

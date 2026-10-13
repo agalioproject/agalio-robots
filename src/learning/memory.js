@@ -61,6 +61,23 @@ function journalAdd(row) {
   store.save('state', 'journal', () => journal.slice(), (e) => logger.warn('journal save failed:', e.message));
 }
 
+/** Deletes this mode's rows (paper OR live, never both) from the Supabase trade_log mirror. */
+async function clearTradeLog() {
+  if (!usingSupabase()) return { ok: true, skipped: true };
+  try {
+    const mode = config.DRY_RUN ? 'paper' : 'live';
+    const res = await fetch(`${config.SUPABASE_URL}/rest/v1/trade_log?mode=eq.${mode}`, {
+      method: 'DELETE',
+      headers: headers({ Prefer: 'return=minimal' }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return { ok: false, error: `trade_log delete ${res.status}: ${(await res.text()).slice(0, 160)}` };
+    return { ok: true, mode };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 function resetJournal() {
   journal = [];
   store.save('state', 'journal', () => [], () => {});
@@ -321,4 +338,4 @@ async function advice() {
   return { advice: a, text: text.replace('30-DAY REVIEW', 'ADVICE FROM YOUR TRADES'), n };
 }
 
-module.exports = { init, getJournal, resetJournal, logTrade, fetchTrades, buildAdvice, formatReview, review, advice };
+module.exports = { init, getJournal, resetJournal, clearTradeLog, logTrade, fetchTrades, buildAdvice, formatReview, review, advice };

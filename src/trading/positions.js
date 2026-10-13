@@ -508,6 +508,19 @@ async function shutdown() {
   await store.flush();
 }
 
+/**
+ * Fresh start for the trading state: history, today's counters, paper balance.
+ * Refuses while anything is open or being bought, so a real position can never be orphaned.
+ */
+async function resetState() {
+  if (open.size > 0 || entering) return { ok: false, why: `${open.size || 1} position(s) still open or being bought — sell them first (/sellall) and try again.` };
+  history = [];
+  daily = { day: null, startSol: 0, realizedSol: 0, paperBalanceSol: config.DRY_RUN ? config.DRY_RUN_BALANCE_SOL : null, tradesToday: 0 };
+  await Promise.all([persistPositions(), persistDaily(), persistHistory()]);
+  await rollDay();
+  return { ok: true };
+}
+
 function listOpen() {
   return [...open.values()];
 }
@@ -523,6 +536,7 @@ function stats() {
 module.exports = {
   tryEnter,
   listOpen,
+  resetState,
   exit,
   exitAll,
   init,

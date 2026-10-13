@@ -141,3 +141,35 @@ test('every command the README lists exists', async () => {
   await command('/resume');
   assert.equal(live.getConfig().paused, false);
 });
+
+test('🧹 Fresh start wipes settings, history, counters and learned data — and refuses while a position is open', async () => {
+  const positions = require('../src/trading/positions');
+  const memory = require('../src/learning/memory');
+  live.setValue('takeProfitPct', 123);
+  live.setValue('minAgeSec', '2s');
+  await memory.logTrade({ mint: 'M1', exitReason: 'take_profit', pct: 10, realizedSol: 0.001 });
+  assert.ok(memory.getJournal().length > 0);
+
+  // 1) blocked while something is open
+  const realList = positions.listOpen;
+  positions.listOpen = () => [{ mint: 'X' }];
+  let r = await bot._internals.freshStart();
+  assert.equal(r.ok, false);
+  assert.equal(live.getConfig().takeProfitPct, 123, 'nothing was wiped');
+  assert.match(bot._internals.resetConfirm().text, /still open/);
+  positions.listOpen = realList;
+
+  // 2) confirm screen is reachable, then the wipe works
+  await command('/reset');
+  assert.match(last().t, /permanently deletes/);
+  await cb('rs:go');
+  const c = live.getConfig();
+  assert.equal(c.takeProfitPct, 60);
+  assert.equal(c.riskProfile, 'medium');
+  assert.equal(c.minAgeSec, 10 * 86400);
+  assert.equal(memory.getJournal().length, 0);
+  assert.equal(positions.stats().history.length, 0);
+  assert.equal(positions.stats().daily.tradesToday, 0);
+  assert.equal(c.paused, false, 'paper mode keeps running');
+  assert.ok(sent.some((x) => /Fresh start done/.test(x.t)));
+});

@@ -6,6 +6,7 @@ const positions = require('../trading/positions');
 const scanner = require('../scanner/scanner');
 const memory = require('../learning/memory');
 const tuner = require('../learning/tuner');
+const store = require('../storage/positionsStore');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
 
 const { getConfig } = live;
@@ -145,7 +146,7 @@ const settingsKeyboard = () => ({
     [btn(GROUPS.trade.title, 'g:trade'), btn(GROUPS.filters.title, 'g:filters')],
     [btn(GROUPS.exec.title, 'g:exec'), btn('🧠 Learning', 'l:open')],
     [btn('✅ Apply & run', 'apply')],
-    [btn('« Main menu', 'nav:main')],
+    [btn('🧹 Fresh start', 'rs:ask'), btn('« Main menu', 'nav:main')],
   ],
 });
 
@@ -296,6 +297,53 @@ function applyAndRun() {
   return `✅ ${wasPaused ? 'Started.' : 'Applied.'} The bot is now running exactly this plan and is scanning now:\n\n${planText()}`;
 }
 
+// ------------------------------------------------------------------ fresh start
+function resetConfirm() {
+  const n = positions.listOpen().length;
+  if (n > 0) {
+    return { text: `🧹 FRESH START\n\n⛔ ${n} position${n > 1 ? 's are' : ' is'} still open. Sell ${n > 1 ? 'them' : 'it'} first (🔥 Sell all), then try again — wiping state with a live position open could orphan it.`, keyboard: { inline_keyboard: [[btn('🔥 Sell all', 'sellall'), btn('« Back', 'nav:settings')]] } };
+  }
+  const rows = [[btn('🧹 Yes, wipe everything', 'rs:go')]];
+  if (store.usingSupabase()) rows.push([btn('🧹 Yes + also delete trade_log rows', 'rs:logs')]);
+  rows.push([btn('Cancel', 'nav:settings')]);
+  return {
+    text: [
+      '🧹 FRESH START',
+      '',
+      'This permanently deletes:',
+      '• ALL your settings → back to the Medium defaults',
+      '• trade history, today\'s counters and the paper balance',
+      '• everything Learning has learned',
+      store.usingSupabase() ? '• (optional) this mode\'s trade_log rows in Supabase' : null,
+      '',
+      'It keeps your wallet and .env, and no positions are open.',
+      DRY_RUN ? 'Paper mode: the bot starts scanning again right away.' : '🔴 LIVE mode: the bot stays PAUSED after the wipe until you review the plan and tap ✅ Apply & run.',
+    ].filter((x) => x != null).join('\n'),
+    keyboard: { inline_keyboard: rows },
+  };
+}
+
+async function freshStart({ wipeLogs = false } = {}) {
+  if (positions.listOpen().length > 0) return { ok: false, text: resetConfirm().text };
+  live.resetToDefaults();
+  live.applyLocal({ paused: !DRY_RUN }); // live money never starts trading by itself after a wipe
+  const r = await positions.resetState();
+  if (!r.ok) return { ok: false, text: `⛔ ${r.why}` };
+  memory.resetJournal();
+  tuner._reset();
+  scanner.clearSeen();
+  let logNote = '';
+  if (wipeLogs) {
+    const l = await memory.clearTradeLog();
+    logNote = l.ok ? (l.skipped ? '' : `\n• trade_log (${l.mode}) rows deleted`) : `\n⚠️ Could not delete trade_log: ${l.error}`;
+  }
+  await store.flush();
+  pending.clear();
+  if (DRY_RUN) scanner.rescanNow();
+  refreshLiveStatus(true);
+  return { ok: true, text: `🧹 Fresh start done:\n• settings reset to Medium defaults\n• history, counters and paper balance cleared\n• learning data cleared${logNote}\n\n${planText()}` };
+}
+
 const NAV_TEXT = {
   main: statusText,
   settings: () => `⚙️ SETTINGS\nPlan: ${profileLabel(getConfig())}\n\nPick a group. Every value can be typed.`,
@@ -318,7 +366,7 @@ const HELP = [
   '',
   '/plan — exactly what the bot is doing now',
   '/apply — save, start and scan right away',
-  '/menu · /report · /review · /learning · /balance · /pause · /resume · /sellall · /risk easy|medium|hard · /cancel',
+  '/menu · /report · /review · /learning · /balance · /pause · /resume · /sellall · /risk easy|medium|hard · /reset · /cancel',
 ].join('\n');
 
 function setListText() {
@@ -350,6 +398,7 @@ function start() {
       { command: 'pause', description: 'Pause the bot' },
       { command: 'resume', description: 'Start the bot' },
       { command: 'sellall', description: 'Sell every open position' },
+      { command: 'reset', description: 'Fresh start: wipe settings and history' },
     ])
     .catch(() => {});
   setTimeout(() => refreshLiveStatus(true), 2000).unref();
@@ -401,6 +450,11 @@ function start() {
     if (!m[1]) return reply(msg, `Plan: ${profileLabel(getConfig())}. Use /risk easy, /risk medium or /risk hard.`);
     live.applyPreset(m[1].toLowerCase());
     reply(msg, `${applyAndRun()}\n\n(The ${m[1].toLowerCase()} preset replaced your custom size / exit / filter values.)`, mainKeyboard());
+  });
+  bot.onText(/^\/(reset|fresh)\b/i, (msg) => {
+    if (!allowed(msg.chat.id)) return;
+    const c = resetConfirm();
+    reply(msg, c.text, c.keyboard);
   });
   bot.onText(/^\/(custom|settings)\b/i, (msg) => allowed(msg.chat.id) && reply(msg, NAV_TEXT.settings(), settingsKeyboard()));
 
@@ -496,6 +550,15 @@ function start() {
         case 'plan':
           screen = { text: planText(), keyboard: mainKeyboard() };
           break;
+        case 'rs': {
+          if (a === 'ask') screen = resetConfirm();
+          else {
+            const r = await freshStart({ wipeLogs: a === 'logs' });
+            toast = r.ok ? 'Fresh start done' : 'Not done';
+            screen = { text: r.text, keyboard: r.ok ? mainKeyboard() : { inline_keyboard: [[btn('« Back', 'nav:settings')]] } };
+          }
+          break;
+        }
         case 'sellall': {
           const n = positions.exitAll('manual');
           toast = n ? `Selling ${n}` : 'None open';
@@ -556,4 +619,4 @@ function notify(text) {
   bot.sendMessage(TELEGRAM_CHAT_ID, text).catch(() => {});
 }
 
-module.exports = { start, notify, _internals: { planText, statusText, reportText, groupText, groupKeyboard, pickerText, pickerKeyboard, learningView, mainKeyboard, settingsKeyboard, activityKeyboard, handleTyped, setListText } };
+module.exports = { start, notify, _internals: { freshStart, resetConfirm, planText, statusText, reportText, groupText, groupKeyboard, pickerText, pickerKeyboard, learningView, mainKeyboard, settingsKeyboard, activityKeyboard, handleTyped, setListText } };

@@ -130,6 +130,14 @@ function notesFor(key, cfg) {
   return notes;
 }
 
+/** Back to factory settings (Medium preset + defaults). Used by Fresh start. */
+function resetToDefaults() {
+  cached = { ...DEFAULTS };
+  schedulePersist();
+  emit({ reset: true });
+  return getConfig();
+}
+
 function listPresets() {
   return Object.entries(PRESETS).map(([key, p]) => ({
     key,
@@ -161,4 +169,4 @@ async function start() {
   }
 }
 
-module.exports = { getConfig, applyLocal, setValue, nudge, toggle, applyPreset, listPresets, onChange, notesFor, PRESETS, DEFAULTS, start };
+module.exports = { getConfig, resetToDefaults, applyLocal, setValue, nudge, toggle, applyPreset, listPresets, onChange, notesFor, PRESETS, DEFAULTS, start };
