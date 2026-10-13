@@ -23,9 +23,10 @@ Open `/menu`. **Every number can be typed**: open a setting and just send a valu
 | ⚙️ Settings → ⚙️ Execution | buy slippage, sell slippage (first try / max), buy & sell priority fee |
 | 🧠 Learning | Off / Suggest / Auto — see below |
 | 📋 Plan / ✅ Apply & run | exactly what the bot will do now; Apply starts the bot **and scans immediately** |
+| ⚙️ Settings → 🧹 Fresh start (`/reset`) | wipes ALL settings (back to Medium), history, today's counters, paper balance and learned data; optionally this mode's Supabase `trade_log` rows. Asks for confirmation, refuses while a position is open, keeps wallet and `.env`. Paper mode resumes scanning; **live mode stays paused** until you tap ✅ Apply & run |
 | 📁 Activity | Report (open, closed, today, why the last scan rejected coins), 7-day Review, Balance |
 
-Commands: `/menu /plan /apply /set <name> <value> /report /review /learning /balance /pause /resume /sellall /risk easy|medium|hard /cancel`.
+Commands: `/menu /plan /apply /set <name> <value> /report /review /learning /balance /pause /resume /sellall /risk easy|medium|hard /reset /cancel`.
 `/set` with no value lists every name, e.g. `/set tp 50`, `/set minage 2s`, `/set maxage 20d`, `/set liq 12000`.
 
 Changes are live the moment you set them (open positions use a new TP/SL/hold immediately). **✅ Apply & run** additionally un-pauses the bot, runs a scan right away, and shows the plan it is now following.

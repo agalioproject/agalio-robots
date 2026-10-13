@@ -10,6 +10,7 @@
 - `npm test` / `npm run check` pointed at files that were not in the repo.
 
 **Added**
+- 🧹 Fresh start (Settings button / `/reset`): confirmed wipe of settings, history, counters, paper balance and learned data (optionally the Supabase `trade_log` rows for the current mode). Blocked while a position is open; live mode stays paused afterwards.
 - Coin-age window: min 2 seconds … max 20 days, typed with units (`2s`, `15m`, `6h`, `10d`).
 - Entry filters in Settings: liquidity, 1h volume, buys, buy/sell ratio, rising rule, 5m/24h drop limits, authority block.
 - Typing works the moment a setting is open; `/set <name> <value>`; `/plan`; **✅ Apply & run** starts the bot and scans immediately.
